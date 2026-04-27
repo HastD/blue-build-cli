@@ -1,12 +1,14 @@
 use std::{
     borrow::Borrow,
+    ffi::OsString,
+    num::NonZeroU32,
     ops::Not,
     path::PathBuf,
     process::{ExitStatus, Output},
 };
 
 use blue_build_utils::{
-    constants::COSIGN_PUB_PATH,
+    constants::{COSIGN_PUB_PATH, DEFAULT_MAX_LAYERS},
     container::{ContainerId, ImageRef, MountId, OciRef, Tag},
     platform::Platform,
     retry,
@@ -19,6 +21,7 @@ use miette::{Context, IntoDiagnostic, Result, bail};
 use oci_client::Reference;
 use rayon::prelude::*;
 use semver::VersionReq;
+use tempfile::TempDir;
 
 use super::{
     Driver,
@@ -184,6 +187,8 @@ pub trait BuildDriver: PrivateDriver {
         let build_opts = BuildOpts::builder()
             .containerfile(opts.containerfile.as_ref())
             .squash(opts.squash)
+            .chunkah(opts.chunkah)
+            .maybe_max_layers(opts.max_layers)
             .maybe_cache_from(opts.cache_from)
             .maybe_cache_to(opts.cache_to)
             .secrets(opts.secrets);
@@ -316,6 +321,33 @@ pub trait ImageStorageDriver: PrivateDriver {
     fn list_images(privileged: bool) -> Result<Vec<Reference>>;
 }
 
+/// Utility methods for using Chunkah to rechunk images.
+#[expect(private_bounds)]
+pub trait ChunkahDriver: PrivateDriver {
+    /// Get additional arguments for building images with Chunkah.
+    #[must_use]
+    fn chunkah_build_args(temp_dir: &TempDir, max_layers: Option<NonZeroU32>) -> Vec<OsString> {
+        let mut args = Vec::with_capacity(7);
+        if let Some(max_layers) = max_layers {
+            args.push("--build-arg".into());
+            args.push(format!("CHUNKAH_MAX_LAYERS={max_layers}").into());
+        }
+        args.push("--skip-unused-stages=false".into());
+
+        args.push("-v".into());
+        let mut volume_arg = OsString::from(temp_dir.path().to_owned());
+        volume_arg.push(":/run/src:Z");
+        args.push(volume_arg);
+
+        args.push("--build-context".into());
+        let mut context_arg = OsString::from("oci-archive-temp=");
+        context_arg.push(temp_dir.path());
+        args.push(context_arg);
+
+        args
+    }
+}
+
 pub trait BuildChunkedOciDriver: BuildDriver + ImageStorageDriver {
     /// Create a manifest containing all the built images.
     /// Runs within the same context as rpm-ostree.
@@ -356,6 +388,7 @@ pub trait BuildChunkedOciDriver: BuildDriver + ImageStorageDriver {
         runner: &RpmOstreeRunner,
         unchunked_image: &ImageRef<'_>,
         final_image: &ImageRef<'_>,
+        max_layers: Option<NonZeroU32>,
         opts: BuildChunkedOciOpts,
     ) -> Result<()> {
         trace!(
@@ -364,9 +397,10 @@ pub trait BuildChunkedOciDriver: BuildDriver + ImageStorageDriver {
                 "runner: {:#?},\n",
                 "unchunked_image: {},\n",
                 "final_image: {},\n",
+                "max_layers: {:?},\n",
                 "opts: {:#?})\n)"
             ),
-            runner, unchunked_image, final_image, opts,
+            runner, unchunked_image, final_image, max_layers, opts,
         );
 
         let prev_image_id = if !opts.clear_plan
@@ -399,7 +433,7 @@ pub trait BuildChunkedOciDriver: BuildDriver + ImageStorageDriver {
             for args,
             "--bootc",
             format!("--format-version={}", opts.format_version),
-            format!("--max-layers={}", opts.max_layers),
+            format!("--max-layers={}", max_layers.unwrap_or(DEFAULT_MAX_LAYERS)),
             format!("--from={unchunked_image}"),
             format!("--output={transport_ref}"),
         );
@@ -440,6 +474,7 @@ pub trait BuildChunkedOciDriver: BuildDriver + ImageStorageDriver {
         let build_opts = BuildOpts::builder()
             .containerfile(btp_opts.containerfile.as_ref())
             .squash(true)
+            .maybe_max_layers(btp_opts.max_layers)
             .secrets(btp_opts.secrets);
 
         let images_to_rechunk: Vec<(ImageRef, ImageRef, Platform)> = btp_opts
@@ -487,6 +522,7 @@ pub trait BuildChunkedOciDriver: BuildDriver + ImageStorageDriver {
                     &runner,
                     &unchunked_image,
                     btp_opts.image,
+                    btp_opts.max_layers,
                     rechunk_opts.with_platform(platform),
                 );
                 // Clean up the unchunked image whether or not rechunking succeeded.
@@ -518,6 +554,7 @@ pub trait BuildChunkedOciDriver: BuildDriver + ImageStorageDriver {
                     &runner,
                     &unchunked_image,
                     &image,
+                    btp_opts.max_layers,
                     rechunk_opts.with_platform(platform),
                 )?;
             }

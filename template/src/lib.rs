@@ -43,6 +43,9 @@ pub struct ContainerFileTemplate<'a> {
     build_features: &'a [String],
     build_engine: BuildEngine,
 
+    #[builder(default)]
+    chunkah: bool,
+
     labels: &'a BTreeMap<String, String>,
 }
 

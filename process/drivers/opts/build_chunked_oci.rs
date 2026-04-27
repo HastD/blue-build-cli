@@ -1,6 +1,4 @@
-use std::num::NonZeroU32;
-
-use blue_build_utils::{constants::DEFAULT_MAX_LAYERS, platform::Platform};
+use blue_build_utils::platform::Platform;
 use bon::Builder;
 use oci_client::Reference;
 
@@ -22,10 +20,6 @@ pub struct BuildChunkedOciOpts {
     /// Format version for `build-chunked-oci`.
     #[builder(default = BuildChunkedOciFormatVersion::V2)]
     pub format_version: BuildChunkedOciFormatVersion,
-
-    /// Maximum number of layers to use. Currently defaults to 64 if not specified.
-    #[builder(default = DEFAULT_MAX_LAYERS)]
-    pub max_layers: NonZeroU32,
 
     /// Build layer plan from scratch instead of using the previous build as a baseline.
     #[builder(default)]

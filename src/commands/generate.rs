@@ -33,6 +33,12 @@ pub struct GenerateCommand {
     #[builder(into)]
     recipe: Option<PathBuf>,
 
+    /// Include instructions in the Containerfile to rechunk the image
+    /// using Chunkah (https://github.com/coreos/chunkah).
+    #[arg(long)]
+    #[builder(default)]
+    chunkah: bool,
+
     /// File to output to instead of STDOUT
     #[arg(short, long)]
     #[builder(into)]
@@ -170,6 +176,7 @@ impl GenerateCommand {
             .build_id(Driver::get_build_id())
             .recipe(&recipe)
             .recipe_path(recipe_path.as_path())
+            .chunkah(self.chunkah)
             .registry(&registry)
             .build_scripts_dir(&build_scripts_dir)
             .base_digest(base_digest)

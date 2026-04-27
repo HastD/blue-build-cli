@@ -9,6 +9,7 @@
 use std::{
     borrow::Borrow,
     fmt::Debug,
+    num::NonZeroU32,
     process::{ExitStatus, Output},
     sync::{LazyLock, RwLock, atomic::AtomicBool},
     time::Duration,
@@ -535,9 +536,10 @@ impl BuildChunkedOciDriver for Driver {
         runner: &RpmOstreeRunner,
         unchunked_image: &ImageRef<'_>,
         final_image: &ImageRef<'_>,
+        max_layers: Option<NonZeroU32>,
         opts: BuildChunkedOciOpts,
     ) -> Result<()> {
-        PodmanDriver::build_chunked_oci(runner, unchunked_image, final_image, opts)
+        PodmanDriver::build_chunked_oci(runner, unchunked_image, final_image, max_layers, opts)
     }
 
     fn build_rechunk_tag_push(opts: BuildRechunkTagPushOpts) -> Result<Vec<String>> {

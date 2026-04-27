@@ -21,8 +21,8 @@ use oci_client::Reference;
 use serde::Deserialize;
 
 use super::{
-    BuildChunkedOciDriver, BuildDriver, ContainerMountDriver, DriverVersion, ImageStorageDriver,
-    RechunkDriver, RunDriver,
+    BuildChunkedOciDriver, BuildDriver, ChunkahDriver, ContainerMountDriver, DriverVersion,
+    ImageStorageDriver, RechunkDriver, RunDriver,
     opts::{
         BuildOpts, ContainerOpts, CreateContainerOpts, ManifestCreateOpts, ManifestPushOpts,
         PruneOpts, PullOpts, PushOpts, RemoveContainerOpts, RemoveImageOpts, RunOpts, RunOptsEnv,
@@ -117,7 +117,19 @@ impl BuildDriver for PodmanDriver {
     fn build(opts: BuildOpts) -> Result<()> {
         trace!("PodmanDriver::build({opts:#?})");
 
-        let temp_dir = tempdir().wrap_err("Failed to create temporary directory for secrets")?;
+        let secrets_temp_dir =
+            tempdir().wrap_err("Failed to create temporary directory for secrets")?;
+
+        let squash = opts.squash || opts.chunkah;
+
+        let chunkah_temp_dir =
+            tempdir().wrap_err("Failed to create temporary directory for Chunkah")?;
+
+        let chunkah_args = if opts.chunkah {
+            Self::chunkah_build_args(&chunkah_temp_dir, opts.max_layers)
+        } else {
+            vec![]
+        };
 
         let command = sudo_cmd!(
             prompt = SUDO_PROMPT,
@@ -129,7 +141,7 @@ impl BuildDriver for PodmanDriver {
                 platform.to_string(),
             ],
             match opts.cache_from.as_ref() {
-                Some(cache_from) if !opts.squash => [
+                Some(cache_from) if !squash => [
                     "--cache-from",
                     format!(
                         "{}/{}",
@@ -140,7 +152,7 @@ impl BuildDriver for PodmanDriver {
                 _ => [],
             },
             match opts.cache_from.as_ref() {
-                Some(cache_to) if !opts.squash => [
+                Some(cache_to) if !squash => [
                     "--cache-to",
                     format!(
                         "{}/{}",
@@ -152,14 +164,15 @@ impl BuildDriver for PodmanDriver {
             },
             "--pull=true",
             if opts.host_network => "--net=host",
-            if !opts.squash => "--layers",
-            if opts.squash => "--squash",
+            if !squash => "--layers",
+            if squash => "--squash",
             "-f",
             opts.containerfile,
             "-t",
             opts.image.to_string(),
-            for opts.secrets.args(&temp_dir)?,
+            for opts.secrets.args(&secrets_temp_dir)?,
             if opts.secrets.ssh() => "--ssh",
+            for chunkah_args,
             ".",
         );
 
@@ -413,6 +426,8 @@ impl BuildDriver for PodmanDriver {
         Ok(())
     }
 }
+
+impl ChunkahDriver for PodmanDriver {}
 
 impl BuildChunkedOciDriver for PodmanDriver {
     fn manifest_create_with_runner(

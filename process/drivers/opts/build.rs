@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{num::NonZeroU32, path::Path};
 
 use blue_build_utils::{
     container::{ImageRef, Tag},
@@ -11,6 +11,7 @@ use oci_client::Reference;
 use super::CompressionType;
 
 /// Options for building
+#[expect(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, Builder)]
 #[builder(derive(Debug, Clone))]
 pub struct BuildOpts<'scope> {
@@ -18,6 +19,13 @@ pub struct BuildOpts<'scope> {
 
     #[builder(default)]
     pub squash: bool,
+
+    /// Enable rechunking the image using Chunkah.
+    #[builder(default)]
+    pub chunkah: bool,
+
+    /// Maximum number of layers to use when rechunking with Chunkah or build-chunked-oci
+    pub max_layers: Option<NonZeroU32>,
 
     pub containerfile: &'scope Path,
 
@@ -142,6 +150,13 @@ pub struct BuildTagPushOpts<'scope> {
     /// Run all steps in a single layer.
     #[builder(default)]
     pub squash: bool,
+
+    /// Enable rechunking the image using Chunkah.
+    #[builder(default)]
+    pub chunkah: bool,
+
+    /// Maximum number of layers to use when rechunking with Chunkah or build-chunked-oci
+    pub max_layers: Option<NonZeroU32>,
 
     /// The platform to build the image on.
     #[builder(default)]

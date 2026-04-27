@@ -12,7 +12,7 @@ use serde::Deserialize;
 use crate::logging::CommandLogging;
 
 use super::{
-    BuildDriver, DriverVersion, ImageStorageDriver,
+    BuildDriver, ChunkahDriver, DriverVersion, ImageStorageDriver,
     opts::{
         BuildOpts, ManifestCreateOpts, ManifestPushOpts, PruneOpts, PullOpts, PushOpts, TagOpts,
         UntagOpts,
@@ -57,24 +57,36 @@ impl BuildDriver for BuildahDriver {
     fn build(opts: BuildOpts) -> Result<()> {
         trace!("BuildahDriver::build({opts:#?})");
 
-        let temp_dir = tempdir().wrap_err("Failed to create temporary directory for secrets")?;
+        let secrets_temp_dir =
+            tempdir().wrap_err("Failed to create temporary directory for secrets")?;
+
+        let squash = opts.squash || opts.chunkah;
+
+        let chunkah_temp_dir =
+            tempdir().wrap_err("Failed to create temporary directory for Chunkah")?;
+
+        let chunkah_args = if opts.chunkah {
+            Self::chunkah_build_args(&chunkah_temp_dir, opts.max_layers)
+        } else {
+            vec![]
+        };
 
         let command = sudo_cmd!(
             prompt = SUDO_PROMPT,
             sudo_check = opts.privileged,
             "buildah",
             "build",
-            for opts.secrets.args(&temp_dir)?,
+            for opts.secrets.args(&secrets_temp_dir)?,
             if opts.secrets.ssh() => "--ssh",
             if let Some(platform) = opts.platform => [
                 "--platform",
                 platform.to_string(),
             ],
             "--pull=true",
-            if !opts.squash => "--layers",
-            if opts.squash => "--squash",
+            if !squash => "--layers",
+            if squash => "--squash",
             match opts.cache_from.as_ref() {
-                Some(cache_from) if !opts.squash => [
+                Some(cache_from) if !squash => [
                     "--cache-from",
                     format!(
                         "{}/{}",
@@ -85,7 +97,7 @@ impl BuildDriver for BuildahDriver {
                 _ => [],
             },
             match opts.cache_from.as_ref() {
-                Some(cache_to) if !opts.squash => [
+                Some(cache_to) if !squash => [
                     "--cache-to",
                     format!(
                         "{}/{}",
@@ -99,6 +111,7 @@ impl BuildDriver for BuildahDriver {
             opts.containerfile,
             "-t",
             opts.image.to_string(),
+            for chunkah_args,
         );
 
         trace!("{command:?}");
@@ -341,6 +354,8 @@ impl BuildDriver for BuildahDriver {
         Ok(())
     }
 }
+
+impl ChunkahDriver for BuildahDriver {}
 
 impl ImageStorageDriver for BuildahDriver {
     fn remove_image(opts: super::opts::RemoveImageOpts) -> Result<()> {

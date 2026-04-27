@@ -21,11 +21,12 @@ use blue_build_recipe::Recipe;
 use blue_build_utils::{
     colors::gen_random_ansi_color,
     constants::{
-        ARCHIVE_SUFFIX, BB_BUILD_ARCHIVE, BB_BUILD_CHUNKED_OCI, BB_BUILD_CHUNKED_OCI_MAX_LAYERS,
-        BB_BUILD_NO_SIGN, BB_BUILD_PLATFORM, BB_BUILD_PUSH, BB_BUILD_RECHUNK,
-        BB_BUILD_RECHUNK_CLEAR_PLAN, BB_BUILD_REMOVE_BASE_IMAGE, BB_BUILD_RETRY_COUNT,
-        BB_BUILD_RETRY_PUSH, BB_BUILD_SQUASH, BB_CACHE_LAYERS, BB_REGISTRY_NAMESPACE,
-        BB_SKIP_VALIDATION, BB_TEMPDIR, CONFIG_PATH, DEFAULT_MAX_LAYERS, RECIPE_FILE, RECIPE_PATH,
+        ARCHIVE_SUFFIX, BB_BUILD_ARCHIVE, BB_BUILD_CHUNKAH, BB_BUILD_CHUNKED_OCI,
+        BB_BUILD_CHUNKED_OCI_MAX_LAYERS, BB_BUILD_NO_SIGN, BB_BUILD_PLATFORM, BB_BUILD_PUSH,
+        BB_BUILD_RECHUNK, BB_BUILD_RECHUNK_CLEAR_PLAN, BB_BUILD_REMOVE_BASE_IMAGE,
+        BB_BUILD_RETRY_COUNT, BB_BUILD_RETRY_PUSH, BB_BUILD_SQUASH, BB_CACHE_LAYERS,
+        BB_REGISTRY_NAMESPACE, BB_SKIP_VALIDATION, BB_TEMPDIR, CONFIG_PATH, RECIPE_FILE,
+        RECIPE_PATH,
     },
     container::{ImageRef, Tag},
     credentials::{Credentials, CredentialsArgs},
@@ -35,7 +36,7 @@ use blue_build_utils::{
 use bon::Builder;
 use clap::Args;
 use log::{debug, info, trace, warn};
-use miette::{Result, bail};
+use miette::Result;
 use oci_client::Reference;
 use rayon::prelude::*;
 
@@ -117,24 +118,29 @@ pub struct BuildCommand {
     #[builder(default)]
     squash: bool,
 
+    /// Uses Chunkah (https://github.com/coreos/chunkah) to rechunk the image,
+    /// allowing for smaller images and smaller updates.
+    #[arg(long, group = "any_rechunker", env = BB_BUILD_CHUNKAH)]
+    #[builder(default)]
+    chunkah: bool,
+
     /// Uses `rpm-ostree compose build-chunked-oci` to rechunk the image,
     /// allowing for smaller images and smaller updates.
     ///
     /// WARN: This will increase the build-time
     /// and take up more space during build-time.
-    #[arg(long, env = BB_BUILD_CHUNKED_OCI)]
+    #[arg(long, group = "any_rechunker", env = BB_BUILD_CHUNKED_OCI)]
     #[builder(default)]
     build_chunked_oci: bool,
 
-    /// Maximum number of layers to use when rechunking. Requires `--build-chunked-oci`.
+    /// Maximum number of layers to use when rechunking with Chunkah or build-chunked-oci.
     #[arg(
         long,
-        default_value_t = DEFAULT_MAX_LAYERS,
         env = BB_BUILD_CHUNKED_OCI_MAX_LAYERS,
-        requires = "build_chunked_oci"
+        requires = "any_rechunker",
+        conflicts_with = "rechunk"
     )]
-    #[builder(default = DEFAULT_MAX_LAYERS)]
-    max_layers: NonZeroU32,
+    max_layers: Option<NonZeroU32>,
 
     /// Removes the base image from local storage and prunes unused podman containers
     /// and volumes after the image is built, but before running build-chunked-oci.
@@ -152,7 +158,7 @@ pub struct BuildCommand {
     /// and take up more space during build-time.
     ///
     /// NOTE: This must be run as root!
-    #[arg(long, group = "archive_rechunk", env = BB_BUILD_RECHUNK)]
+    #[arg(long, group = "any_rechunker", group = "archive_rechunk", env = BB_BUILD_RECHUNK)]
     #[builder(default)]
     rechunk: bool,
 
@@ -194,7 +200,7 @@ impl BlueBuildCommand for BuildCommand {
     fn try_run(&mut self) -> Result<()> {
         trace!("BuildCommand::try_run()");
 
-        Driver::init(if self.build_chunked_oci || self.rechunk {
+        Driver::init(if self.chunkah || self.build_chunked_oci || self.rechunk {
             DriverArgs::builder()
                 .build_driver(BuildDriverType::Podman)
                 .run_driver(RunDriverType::Podman)
@@ -206,14 +212,6 @@ impl BlueBuildCommand for BuildCommand {
         });
 
         Credentials::init(self.credentials.clone());
-
-        if self.push && self.archive.is_some() {
-            bail!("You cannot use '--archive' and '--push' at the same time");
-        }
-
-        if self.rechunk && self.build_chunked_oci {
-            bail!("You cannot use '--rechunk' and '--build-chunked-oci' at the same time");
-        }
 
         if self.push && !self.no_sign {
             blue_build_utils::check_command_exists("cosign")?;
@@ -250,6 +248,7 @@ impl BlueBuildCommand for BuildCommand {
                 .skip_validation(self.skip_validation)
                 .maybe_platform(self.platform.first().copied())
                 .recipe(recipe)
+                .chunkah(self.chunkah)
                 .drivers(self.drivers)
                 .build()
                 .try_run()
@@ -371,6 +370,8 @@ impl BuildCommand {
             .containerfile(containerfile)
             .platform(platforms)
             .squash(self.squash)
+            .chunkah(self.chunkah)
+            .maybe_max_layers(self.max_layers)
             .maybe_cache_from(cache_image)
             .maybe_cache_to(cache_image)
             .secrets(secrets);
@@ -398,7 +399,6 @@ impl BuildCommand {
                 .then_some(base_image.clone_with_digest(base_digest));
 
             let rechunk_opts = BuildChunkedOciOpts::builder()
-                .max_layers(self.max_layers)
                 .clear_plan(self.rechunk_clear_plan)
                 .build();
             Driver::build_rechunk_tag_push(

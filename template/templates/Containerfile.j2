@@ -5,7 +5,7 @@ FROM "${BASE_IMAGE}" AS {{ main_stage }}
 {% include "stages.j2" %}
 
 # Main image
-FROM {{ main_stage }}
+FROM {{ main_stage }} {%- if chunkah %} AS builder {%- endif %}
 
 ARG TARGETARCH
 ARG RECIPE={{ recipe_path.display() }}
@@ -55,7 +55,25 @@ RUN \
   {{ scripts_mount("/scripts/") }} \
   /scripts/post_build.sh
 
+{%- if chunkah %}
+
+FROM quay.io/coreos/chunkah AS chunkah
+ARG CHUNKAH_MAX_LAYERS={{ blue_build_utils::constants::DEFAULT_MAX_LAYERS }}
+RUN --mount=from=builder,src=/,target=/chunkah,ro \
+  --mount=type=bind,target=/run/src,rw \
+    chunkah build --prune /sysroot/ --max-layers ${CHUNKAH_MAX_LAYERS} \
+      {%- for (name, value) in labels %}
+      --label="{{ name }}={{ value }}" \
+      {%- endfor %}
+      > /run/src/out.ociarchive
+
+FROM oci-archive:out.ociarchive
+
+{%- else %}
+
 # Labels are added last since they cause cache misses with buildah
 {%- for (name, value) in labels %}
 LABEL {{ name }}="{{ value }}"
 {%- endfor %}
+
+{%- endif %}
