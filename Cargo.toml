@@ -94,7 +94,6 @@ clap = { workspace = true, features = ["derive", "cargo", "unicode", "env"] }
 colored.workspace = true
 comlexr.workspace = true
 indexmap.workspace = true
-indicatif.workspace = true
 log.workspace = true
 miette = { workspace = true, features = ["fancy"] }
 oci-client.workspace = true
@@ -105,8 +104,6 @@ semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
-syntect.workspace = true
-tempfile.workspace = true
 tokio.workspace = true
 bon.workspace = true
 

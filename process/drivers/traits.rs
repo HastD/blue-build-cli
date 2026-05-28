@@ -1,5 +1,6 @@
 use std::{
     borrow::Borrow,
+    fmt::Debug,
     ops::Not,
     path::PathBuf,
     process::{ExitStatus, Output},
@@ -25,9 +26,10 @@ use super::{
     opts::{
         BuildChunkedOciOpts, BuildOpts, BuildRechunkTagPushOpts, BuildTagPushOpts,
         CheckKeyPairOpts, ContainerOpts, CopyOciOpts, CreateContainerOpts, GenerateImageNameOpts,
-        GenerateKeyPairOpts, GenerateTagsOpts, GetMetadataOpts, PruneOpts, PullOpts, PushOpts,
-        RechunkOpts, RemoveContainerOpts, RemoveImageOpts, RunOpts, SignOpts, SignVerifyOpts,
-        SwitchOpts, TagOpts, UntagOpts, VerifyOpts, VerifyType, VolumeOpts,
+        GenerateKeyPairOpts, GenerateTagsOpts, GetMetadataOpts, InspectImageOpts,
+        PostBuildDriverOpts, PostBuildOpts, PruneOpts, PullOpts, PushOpts, RechunkOpts,
+        RemoveContainerOpts, RemoveImageOpts, RunOpts, SignOpts, SignVerifyOpts, SwitchOpts,
+        TagOpts, UntagOpts, VerifyOpts, VerifyType, VolumeOpts,
     },
     opts::{ManifestCreateOpts, ManifestPushOpts},
     rpm_ostree_runner::RpmOstreeRunner,
@@ -108,8 +110,7 @@ pub trait DriverVersion: PrivateDriver {
 }
 
 /// Allows agnostic building, tagging, pushing, and login.
-#[expect(private_bounds)]
-pub trait BuildDriver: PrivateDriver {
+pub trait BuildDriver: ImageStorageDriver {
     /// Runs the build logic for the driver.
     ///
     /// # Errors
@@ -175,30 +176,26 @@ pub trait BuildDriver: PrivateDriver {
             opts.platform.is_empty().not(),
             "Must have at least 1 platform"
         );
-        let platform_images: Vec<(ImageRef<'_>, Platform)> = opts
-            .platform
-            .iter()
-            .map(|&platform| (opts.image.with_platform(platform), platform))
-            .collect();
 
-        let build_opts = BuildOpts::builder()
+        let build_opts_base = BuildOpts::builder()
             .containerfile(opts.containerfile.as_ref())
             .squash(opts.squash)
             .maybe_cache_from(opts.cache_from)
             .maybe_cache_to(opts.cache_to)
-            .secrets(opts.secrets);
-        let build_opts = platform_images
-            .iter()
-            .map(|(image, platform)| build_opts.clone().image(image).platform(*platform).build())
-            .collect::<Vec<_>>();
+            .secrets(opts.secrets)
+            .privileged(opts.privileged);
 
-        build_opts
-            .par_iter()
-            .try_for_each(|&build_opts| -> Result<()> {
-                info!("Building image {}", build_opts.image);
-
-                Self::build(build_opts)
-            })?;
+        opts.platform.par_iter().try_for_each(|&platform| {
+            let image = opts.image.with_platform(platform);
+            info!("Building image {image}");
+            Self::build(
+                build_opts_base
+                    .clone()
+                    .image(&image)
+                    .platform(platform)
+                    .build(),
+            )
+        })?;
 
         let image_list: Vec<String> = match &opts.image {
             ImageRef::Remote(image) if !opts.tags.is_empty() => {
@@ -255,6 +252,46 @@ pub trait BuildDriver: PrivateDriver {
     }
 }
 
+/// Trait for a postprocessing step (such as rechunking) that can be applied to
+/// images after they're built.
+pub trait PostBuild: Debug {
+    /// Check driver requirements for post-build steps.
+    ///
+    /// # Errors
+    /// Will error if driver requirements are not met.
+    fn check_driver_requirements(&self) -> Result<()>;
+
+    /// Run any initialization for the post-build steps.
+    ///
+    /// # Errors
+    /// Will error if an initialization step fails.
+    fn init(&self) -> Result<Box<dyn PostBuildRunner>>;
+}
+
+/// Auxiliary trait that actually runs the postprocessing step.
+pub trait PostBuildRunner {
+    /// Run postprocessing on image. Implementors should write the output image
+    /// to the image reference given by `opts.output_image`.
+    ///
+    /// # Errors
+    /// Will error if postprocessing fails.
+    fn post_build(&self, opts: PostBuildOpts) -> Result<()>;
+}
+
+/// A build driver that can run post-build steps.
+pub trait PostBuildDriver: BuildDriver {
+    /// Runs the logic for building, tagging, and pushing an image, with post-
+    /// build processing applied after building but before tagging and pushing.
+    ///
+    /// # Errors
+    /// Will error if building, post-build processing, tagging, or pushing
+    /// fails.
+    fn build_tag_push_with_post_build(
+        opts: BuildTagPushOpts,
+        pb_opts: PostBuildDriverOpts,
+    ) -> Result<Vec<String>>;
+}
+
 /// Allows agnostic inspection of images.
 #[expect(private_bounds)]
 pub trait InspectDriver: PrivateDriver {
@@ -303,6 +340,12 @@ pub trait RunDriver: ImageStorageDriver {
 /// Allows agnostic management of container image storage.
 #[expect(private_bounds)]
 pub trait ImageStorageDriver: PrivateDriver {
+    /// Gets low-level image metadata and writes it to a file or returns it.
+    ///
+    /// # Errors
+    /// Will error if the image inspection command fails.
+    fn inspect_image(opts: InspectImageOpts) -> Result<Option<Vec<u8>>>;
+
     /// Removes an image
     ///
     /// # Errors
@@ -465,7 +508,7 @@ pub trait BuildChunkedOciDriver: BuildDriver + ImageStorageDriver {
         if let Some(base_image) = remove_base_image {
             Self::remove_image(
                 RemoveImageOpts::builder()
-                    .image(base_image)
+                    .image(&base_image.to_string())
                     .privileged(btp_opts.privileged)
                     .build(),
             )?;
@@ -491,7 +534,11 @@ pub trait BuildChunkedOciDriver: BuildDriver + ImageStorageDriver {
                 );
                 // Clean up the unchunked image whether or not rechunking succeeded.
                 if let ImageRef::Remote(unchunked_image) = unchunked_image {
-                    Self::remove_image(RemoveImageOpts::builder().image(&unchunked_image).build())?;
+                    Self::remove_image(
+                        RemoveImageOpts::builder()
+                            .image(&unchunked_image.to_string())
+                            .build(),
+                    )?;
                 }
                 result?;
 
@@ -778,7 +825,7 @@ pub trait RechunkDriver: RunDriver + BuildDriver + ContainerMountDriver {
             )?;
             Self::remove_image(
                 RemoveImageOpts::builder()
-                    .image(image)
+                    .image(&image.to_string())
                     .privileged(true)
                     .build(),
             )?;
@@ -831,7 +878,7 @@ pub trait RechunkDriver: RunDriver + BuildDriver + ContainerMountDriver {
         )?;
         Self::remove_image(
             RemoveImageOpts::builder()
-                .image(image)
+                .image(&image.to_string())
                 .privileged(true)
                 .build(),
         )?;

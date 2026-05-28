@@ -90,7 +90,11 @@ impl BlueBuildCommand for SwitchCommand {
                 .build(),
         )?;
         PodmanDriver::copy_image_to_root_store(&image_name)?;
-        PodmanDriver::remove_image(RemoveImageOpts::builder().image(&image_name).build())?;
+        PodmanDriver::remove_image(
+            RemoveImageOpts::builder()
+                .image(&image_name.to_string())
+                .build(),
+        )?;
 
         if status
             .booted_image()
